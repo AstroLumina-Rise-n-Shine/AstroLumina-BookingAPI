@@ -12,13 +12,40 @@ jobs:
     permissions:
       contents: write
 
+    # `code_changed` gates everything downstream: only application-code
+    # changes produce a new version, image and promotion. Docs, tests and
+    # infra-only merges reuse the latest tag and skip the docker job (see the
+    # `changes` step for what counts as code).
     outputs:
       version: ${{ steps.version.outputs.version }}
+      code_changed: ${{ steps.changes.outputs.code }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+
+      - name: Check for application code changes
+        # The version (and therefore the image and the promotion) must only
+        # move when the shipped application changes. Everything matching the
+        # ignore patterns below -- tests, Docker/infra files, pipelines, docs,
+        # toolchain pins -- never affects the built image, so a merge touching
+        # only those reuses the latest tag instead of cutting a new version.
+        # Anything NOT listed (src, public, package.json/lock, build configs,
+        # VERSION.json, vendor) counts as application code.
+        id: changes
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          code=false
+          while IFS= read -r f; do
+            case "$f" in
+              test/*|Dockerfile|docker-compose.yml|docker-entrypoint.sh|nginx.conf|.dockerignore|.github/*|*.md|eslint.config.js|.nvmrc|wrangler.toml) ;;
+              *) code=true; break ;;
+            esac
+          done <<< "$(git diff --name-only "$base" "$head")"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Application code changed: $code"
 
       - name: Read version and create tag
         id: version
@@ -27,13 +54,18 @@ jobs:
           minor=$(jq -r '.minor' VERSION.json)
 
           latest=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
-          current_patch=$(echo "$latest" | cut -d. -f3)
-          new_patch=${current_patch:-0}
-          new_patch=$((new_patch + 1))
+          if [ "${{ steps.changes.outputs.code }}" = "true" ]; then
+            current_patch=$(echo "$latest" | cut -d. -f3)
+            new_patch=${current_patch:-0}
+            new_patch=$((new_patch + 1))
 
-          new_version="v${major}.${minor}.${new_patch}"
-          echo "version=$new_version" >> $GITHUB_OUTPUT
-          echo "New version: $new_version"
+            new_version="v${major}.${minor}.${new_patch}"
+            echo "version=$new_version" >> $GITHUB_OUTPUT
+            echo "New version: $new_version"
+          else
+            echo "version=v$latest" >> $GITHUB_OUTPUT
+            echo "Docs/infra-only change -- reusing latest tag v$latest, no new version."
+          fi
 
       - name: Configure Git
         run: |
@@ -41,12 +73,16 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Create and push tag
+        if: steps.changes.outputs.code == 'true'
         run: |
           git tag ${{ steps.version.outputs.version }}
           git push origin ${{ steps.version.outputs.version }}
 
   docker:
     needs: version
+    # No new version, no new image: docs/infra-only merges end in the
+    # `version` job above (green, but without tag or image).
+    if: needs.version.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -57,6 +57,24 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
+      - name: Resolve built version from git tag
+        # Backstop for docs/infra-only merges: the build pipeline cuts a tag
+        # only for application-code changes, and plain `git describe` would
+        # happily return an OLD tag for an untagged commit (re-promoting it).
+        # Require a version tag pointing EXACTLY at the built commit.
+        id: ver
+        run: |
+          sha="${{ github.event.workflow_run.head_sha }}"
+          ver=$(git tag --points-at "$sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$ver" ]; then
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "No version tag on $sha (docs/infra-only change) -- nothing to promote."
+          else
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+            echo "version=$ver" >> "$GITHUB_OUTPUT"
+            echo "Promoting version: $ver"
+          fi
+
       - name: Check the built commit merged into main
         # The upstream pipeline runs on PR-close, so its head commit is a
         # merge only when the PR was actually merged. Closed-but-unmerged PRs
@@ -72,17 +90,14 @@ jobs:
           if [ -z "$pr" ]; then
             echo "promote=false" >> "$GITHUB_OUTPUT"
             echo "Head commit $sha is not a merge into main -- skipping promotion."
+          elif [ "${{ steps.ver.outputs.tagged }}" != "true" ]; then
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+            echo "Head commit $sha carries no new version tag (docs/infra-only change) -- skipping promotion."
           else
             echo "promote=true" >> "$GITHUB_OUTPUT"
             echo "Head commit $sha merged into main via PR #$pr -- promoting."
           fi
 
-      - name: Resolve built version from git tag
-        id: ver
-        run: |
-          ver=$(git describe --tags --abbrev=0 "${{ github.event.workflow_run.head_sha }}")
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "Promoting version: $ver"
 
   promote-kubernetes:
     # Reads the live color from the *-live Service (parsed as YAML), bumps
