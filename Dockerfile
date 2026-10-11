@@ -26,6 +26,11 @@ WORKDIR /app
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 -G nodejs
 
+# Strip npm from the runtime image: its bundled deps (undici, tar) carry HIGH
+# CVEs, and nothing here executes npm (CMD runs node directly). Build stages
+# above keep npm for `npm ci` / `npm run build`.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
