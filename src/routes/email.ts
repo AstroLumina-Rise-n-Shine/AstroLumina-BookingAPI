@@ -80,7 +80,7 @@ async function cleanupTempFile(filePath: string): Promise<void> {
   try {
     await fs.unlink(filePath);
   } catch (error) {
-    console.error(`Failed to delete temp file ${filePath}:`, error);
+    console.error("Failed to delete temp file:", filePath, error);
   }
 }
 
@@ -152,6 +152,20 @@ router.post(
           const fullUrl = attachmentUrl.startsWith("http")
             ? attachmentUrl
             : `${env.R2_BASE_URL}/pdfs/${attachmentUrl}`;
+          // SSRF guard: the server fetches this URL itself, so only our own
+          // R2 host is allowed. An absolute attacker URL (internal metadata
+          // endpoints, LAN hosts, third-party servers) is rejected before
+          // any request leaves the box.
+          const parsedUrl = new URL(fullUrl);
+          if (
+            parsedUrl.protocol !== "https:" ||
+            parsedUrl.host !== new URL(env.R2_BASE_URL).host
+          ) {
+            throw createError(
+              400,
+              "Attachment URL must point to our own storage",
+            );
+          }
 
           const localPath = await downloadR2ToLocal(fullUrl);
           attachmentFiles.push(localPath);

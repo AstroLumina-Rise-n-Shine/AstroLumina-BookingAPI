@@ -4,6 +4,7 @@ import { Resend } from "resend";
 import * as d1 from "../services/d1.js";
 import { env } from "../config/env.js";
 import { createError } from "../middleware/error-handler.js";
+import { escapeHtml } from "../utils/escape-html.js";
 
 const router = Router();
 
@@ -118,7 +119,8 @@ router.post(
     });
     await Promise.all(attendeePromises);
 
-    const namesList = holders.map((h) => h.fullName).join(", ");
+    const namesList = holders.map((h) => escapeHtml(h.fullName)).join(", ");
+    const safeEventTitle = escapeHtml(eventTitle ?? "Constelații");
     const allEmails = holders.map((h) => h.email).filter(Boolean) as string[];
     const uniqueEmails = [...new Set(allEmails)];
 
@@ -126,14 +128,14 @@ router.post(
       await resend.emails.send({
         from: FROM_EMAIL,
         to: allEmails,
-        subject: `Confirmare rezervare - ${eventTitle ?? "Constelații"}`,
+        subject: `Confirmare rezervare - ${safeEventTitle}`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #0a0a1a; color: #f3e8ff;">
             <h1 style="color: #a855f7;">Confirmare rezervare</h1>
             <p>Stimate/doamna,</p>
             <p>Rezervarea ta a fost confirmată!</p>
             <div style="margin: 20px 0; padding: 15px; background: #1a1a2e; border-radius: 8px;">
-              <p><strong>Eveniment:</strong> ${eventTitle ?? "Constelații"}</p>
+              <p><strong>Eveniment:</strong> ${safeEventTitle}</p>
               <p><strong>Data:</strong> ${eventDate ? new Date(eventDate).toLocaleDateString("ro-RO") : "TBA"}</p>
               <p><strong>Număr participanți:</strong> ${ticketCount}</p>
               <p><strong>Participanți:</strong> ${namesList}</p>
