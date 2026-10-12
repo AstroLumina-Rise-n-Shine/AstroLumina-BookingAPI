@@ -10,8 +10,9 @@ name: Promote Staging
 # head_branch is the PR *source* branch, never `main` -- a branches:[main]
 # filter would never match and promotion would silently never run. The
 # main-targeting is enforced instead by the gate on the `resolve` job.
-# The promoted version is resolved once from the git tag on the exact commit
-# the upstream run built, then shared by three parallel jobs -- one per
+# The promoted version is resolved once from the git tag on the merge commit
+# (the upstream head_sha is the PR head; the tag lives on main HEAD), then
+# shared by three parallel jobs -- one per
 # target repo, each with that repo's own checkout, bump logic, branch and
 # pull request. Merge stays manual: the branch-protection rule on main is
 # untouched, a human merges each promotion PR.
@@ -56,31 +57,19 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          # Tags are NOT fetched by default (checkout passes --no-tags):
+          # without this, `git tag --points-at` below is always empty and
+          # promotion silently never runs.
+          fetch-tags: true
 
-      - name: Resolve built version from git tag
-        # Backstop for docs/infra-only merges: the build pipeline cuts a tag
-        # only for application-code changes, and plain `git describe` would
-        # happily return an OLD tag for an untagged commit (re-promoting it).
-        # Require a version tag pointing EXACTLY at the built commit.
-        id: ver
-        run: |
-          sha="${{ github.event.workflow_run.head_sha }}"
-          ver=$(git tag --points-at "$sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
-          if [ -z "$ver" ]; then
-            echo "tagged=false" >> "$GITHUB_OUTPUT"
-            echo "No version tag on $sha (docs/infra-only change) -- nothing to promote."
-          else
-            echo "tagged=true" >> "$GITHUB_OUTPUT"
-            echo "version=$ver" >> "$GITHUB_OUTPUT"
-            echo "Promoting version: $ver"
-          fi
-
-      - name: Check the built commit merged into main
-        # The upstream pipeline runs on PR-close, so its head commit is a
-        # merge only when the PR was actually merged. Closed-but-unmerged PRs
-        # must never promote: ask the API which PRs contain this commit and
-        # require one that is merged with base main.
-        id: gate
+      - name: Find the merged PR for the built commit
+        # The upstream `head_sha` is the PR *head* commit, but the build
+        # pipeline cuts the version tag on main HEAD (the squash-merge
+        # commit) -- so the tag NEVER points at head_sha and a lookup on it
+        # always misses. Resolve the merge commit through the API and use IT
+        # for the tag lookup below. Closed-but-unmerged PRs have no merged PR
+        # here and stop the flow.
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -88,14 +77,47 @@ jobs:
           pr=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
             --jq '[.[] | select(.merged_at != null and .base.ref == "main")][0].number // empty')
           if [ -z "$pr" ]; then
-            echo "promote=false" >> "$GITHUB_OUTPUT"
             echo "Head commit $sha is not a merge into main -- skipping promotion."
-          elif [ "${{ steps.ver.outputs.tagged }}" != "true" ]; then
-            echo "promote=false" >> "$GITHUB_OUTPUT"
-            echo "Head commit $sha carries no new version tag (docs/infra-only change) -- skipping promotion."
           else
+            merge_sha=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.merge_commit_sha // empty')
+            # Rebase merges have no merge commit: fall back to the head
+            # itself (only squash and merge-commit flows are supported).
+            [ -z "$merge_sha" ] && merge_sha="$sha"
+            echo "pr=$pr" >> "$GITHUB_OUTPUT"
+            echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+            echo "Head commit $sha merged into main via PR #$pr (merge commit $merge_sha)."
+          fi
+
+      - name: Resolve built version from git tag
+        # Backstop for docs/infra-only merges: the build pipeline cuts a tag
+        # only for application-code changes, and plain `git describe` would
+        # happily return an OLD tag for an untagged commit (re-promoting it).
+        # Require a version tag pointing EXACTLY at the merge commit.
+        id: ver
+        run: |
+          sha="${{ steps.pr.outputs.merge_sha }}"
+          if [ -z "$sha" ]; then
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "No merged PR resolved -- nothing to promote."
+          else
+            ver=$(git tag --points-at "$sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+            if [ -z "$ver" ]; then
+              echo "tagged=false" >> "$GITHUB_OUTPUT"
+              echo "No version tag on merge commit $sha (docs/infra-only change) -- nothing to promote."
+            else
+              echo "tagged=true" >> "$GITHUB_OUTPUT"
+              echo "version=$ver" >> "$GITHUB_OUTPUT"
+              echo "Promoting version: $ver"
+            fi
+          fi
+
+      - name: Decide promotion
+        id: gate
+        run: |
+          if [ -n "${{ steps.pr.outputs.pr }}" ] && [ "${{ steps.ver.outputs.tagged }}" = "true" ]; then
             echo "promote=true" >> "$GITHUB_OUTPUT"
-            echo "Head commit $sha merged into main via PR #$pr -- promoting."
+          else
+            echo "promote=false" >> "$GITHUB_OUTPUT"
           fi
 
 
