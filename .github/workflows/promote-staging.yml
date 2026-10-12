@@ -133,7 +133,7 @@ jobs:
       - name: Checkout Kubernetes repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: AstroLumina-by-Carmen-Ilie/AstroLumina-Kubernetes
+          repository: AstroLumina-Rise-n-Shine/AstroLumina-Kubernetes
           token: ${{ secrets.GITOPS_PAT }}
           fetch-depth: 0
 
@@ -247,7 +247,7 @@ jobs:
       - name: Checkout Helm repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: AstroLumina-by-Carmen-Ilie/AstroLumina-Helm
+          repository: AstroLumina-Rise-n-Shine/AstroLumina-Helm
           token: ${{ secrets.GITOPS_PAT }}
           fetch-depth: 0
 
@@ -371,7 +371,7 @@ jobs:
       - name: Checkout DockerCompose repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: AstroLumina-by-Carmen-Ilie/AstroLumina-DockerCompose
+          repository: AstroLumina-Rise-n-Shine/AstroLumina-DockerCompose
           token: ${{ secrets.GITOPS_PAT }}
           fetch-depth: 0
 
