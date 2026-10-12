@@ -52,16 +52,6 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       promote: ${{ steps.gate.outputs.promote }}
     steps:
-      - name: Checkout app repo at the built commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 0
-          # Tags are NOT fetched by default (checkout passes --no-tags):
-          # without this, `git tag --points-at` below is always empty and
-          # promotion silently never runs.
-          fetch-tags: true
-
       - name: Find the merged PR for the built commit
         # The upstream `head_sha` is the PR *head* commit, but the build
         # pipeline cuts the version tag on main HEAD (the squash-merge
@@ -100,7 +90,15 @@ jobs:
             echo "tagged=false" >> "$GITHUB_OUTPUT"
             echo "No merged PR resolved -- nothing to promote."
           else
-            ver=$(git tag --points-at "$sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+            # No checkout of PR-controlled code anywhere in this job: tags are
+            # listed remotely instead (keeps Semgrep
+            # workflow-run-target-code-checkout quiet by construction).
+            # Peeled ^{} SHAs cover annotated tags, plain SHAs cover
+            # lightweight ones; still requires a version tag on EXACTLY the
+            # merge commit, same semantics as `git tag --points-at`.
+            ver=$(git ls-remote --tags "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+              | awk -v sha="$sha" '{ n=$2; sub(/^refs\/tags\//, "", n); sub(/\^\{\}$/, "", n); if ($1 == sha) print n }' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
             if [ -z "$ver" ]; then
               echo "tagged=false" >> "$GITHUB_OUTPUT"
               echo "No version tag on merge commit $sha (docs/infra-only change) -- nothing to promote."
