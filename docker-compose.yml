@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/astrolumina-by-carmen-ilie/astrolumina-bookingapi:latest
+    image: ghcr.io/astrolumina-rise-n-shine/astrolumina-bookingapi:latest
     pull_policy: always
     restart: unless-stopped
     environment:

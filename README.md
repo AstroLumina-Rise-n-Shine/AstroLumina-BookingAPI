@@ -242,8 +242,8 @@ Node Version:    22.x
 Images are automatically built and pushed to GitHub Container Registry:
 
 ```
-ghcr.io/astrolumina-by-carmen-ilie/astrolumina-bookingapi:latest
-ghcr.io/astrolumina-by-carmen-ilie/astrolumina-bookingapi:v1.0.0
+ghcr.io/astrolumina-rise-n-shine/astrolumina-bookingapi:latest
+ghcr.io/astrolumina-rise-n-shine/astrolumina-bookingapi:v1.0.0
 ```
 
 ### CI/CD Pipeline
