@@ -4,10 +4,26 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  # Manual runs (Actions -> Run workflow, from main) intentionally skip the
+  # change detection below: a dispatch always cuts a new patch version and
+  # builds the image, even when the changed files are in the exclusion list.
+  # The existing promote chain then opens the staging promotion PRs.
+  workflow_dispatch:
+
+# Serialize builds: each run derives the next version from the latest git
+# tag, so overlapping runs (a dispatch next to a merge, or two quick merges)
+# would race to push the same tag. Queued, never cancelled.
+concurrency:
+  group: build-deploy
+  cancel-in-progress: false
 
 jobs:
   version:
-    if: github.event.pull_request.merged == true
+    # pull_request events reach this job only for merged PRs; a manual
+    # dispatch carries no PR payload and must always proceed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -15,7 +31,8 @@ jobs:
     # `code_changed` gates everything downstream: only application-code
     # changes produce a new version, image and promotion. Docs, tests and
     # infra-only merges reuse the latest tag and skip the docker job (see the
-    # `changes` step for what counts as code).
+    # `changes` step for what counts as code). Manual dispatches force
+    # `code_changed=true`: they always cut a new version.
     outputs:
       version: ${{ steps.version.outputs.version }}
       code_changed: ${{ steps.changes.outputs.code }}
@@ -35,6 +52,14 @@ jobs:
         # VERSION.json, vendor) counts as application code.
         id: changes
         run: |
+          # Manual dispatch: the operator explicitly asked for a build, so the
+          # exclusion list does not apply and a new version is always cut (the
+          # "and only when called manually" branch of the rule).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -- forcing a new version (change detection skipped)."
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           base="${{ github.event.pull_request.base.sha }}"
           head="${{ github.event.pull_request.head.sha }}"
           # The SHAs come from the event payload and may postdate the
@@ -54,7 +79,7 @@ jobs:
             # failed-or-empty diff would silently read as code=true.
             [ -z "$f" ] && continue
             case "$f" in
-              test/*|Dockerfile|docker-compose.yml|docker-entrypoint.sh|nginx.conf|.dockerignore|.github/*|*.md|eslint.config.js|.nvmrc|wrangler.toml) ;;
+              test/*|Dockerfile|docker-compose.yml|docker-entrypoint.sh|.dockerignore|.github/*|*.md) ;;
               *) code=true; break ;;
             esac
           done <<< "$files"
