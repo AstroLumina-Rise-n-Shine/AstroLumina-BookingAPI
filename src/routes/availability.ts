@@ -17,9 +17,17 @@ const router = Router();
 
 const slotsQuerySchema = z.object({
   eventTypeId: z.coerce.number().int().positive("eventTypeId is required"),
-  startTime: z.string().min(1, "startTime is required (ISO 8601)"),
-  endTime: z.string().min(1, "endTime is required (ISO 8601)"),
-  timeZone: z.string().default("Europe/Bucharest"),
+  startTime: z
+    .string()
+    .min(1, "startTime is required (ISO 8601)")
+    .max(64)
+    .refine((v) => !/[\r\n]/.test(v), "startTime must not contain CR/LF"),
+  endTime: z
+    .string()
+    .min(1, "endTime is required (ISO 8601)")
+    .max(64)
+    .refine((v) => !/[\r\n]/.test(v), "endTime must not contain CR/LF"),
+  timeZone: z.string().max(64).default("Europe/Bucharest"),
 });
 
 /**
@@ -98,9 +106,9 @@ router.get(
 
       const queryParse = z
         .object({
-          startTime: z.string().min(1),
-          endTime: z.string().min(1),
-          timeZone: z.string().default("Europe/Bucharest"),
+          startTime: z.string().min(1).max(64),
+          endTime: z.string().min(1).max(64),
+          timeZone: z.string().max(64).default("Europe/Bucharest"),
         })
         .safeParse(req.query);
 

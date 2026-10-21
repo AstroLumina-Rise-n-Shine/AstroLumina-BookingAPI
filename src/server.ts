@@ -7,8 +7,11 @@ import morgan from "morgan";
 import { env } from "./config/env.js";
 import {
   securityHeaders,
+  permissionsPolicy,
+  originGuard,
   corsMiddleware,
   rateLimiter,
+  strictRateLimiter,
 } from "./middleware/security.js";
 import {
   payloadTooLargeHandler,
@@ -38,7 +41,10 @@ app.get("/metrics", metricsHandler);
 app.use(metricsMiddleware);
 
 // ─── Security ────────────────────────────────────────────────
+app.disable("x-powered-by");
 app.use(securityHeaders);
+app.use(permissionsPolicy);
+app.use(originGuard);
 app.use(corsMiddleware);
 app.use(rateLimiter);
 
@@ -49,7 +55,30 @@ app.use(compression());
 app.use(morgan(isProduction ? "combined" : "dev"));
 
 // ─── Body parser ─────────────────────────────────────────────
-app.use(express.json({ limit: "1mb" }));
+// This API receives small JSON payloads only; 256kb is ample for any of
+// the booking/email/contact bodies and caps abuse surface.
+app.use(express.json({ limit: "256kb" }));
+
+// ─── robots.txt ──────────────────────────────────────────────
+// Nothing on this API is meant for search engines; disallow everything so
+// scanners/crawlers do not enumerate route paths.
+app.get("/robots.txt", (_req, res) => {
+  res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+});
+
+// ─── Strict rate limiting for abuse-prone POST routes ────────
+// The email relay and event-confirmation endpoints are unauthenticated
+// POSTs that trigger outbound emails/rate-limited work; they get their own
+// tighter bucket (5 req/min) on top of the global 30 req/min limiter.
+app.use(
+  [
+    "/send-email",
+    "/send-email-with-attachments",
+    "/send-contact-email",
+    "/events/send-event-confirmation",
+  ],
+  strictRateLimiter,
+);
 
 // ─── Routes ──────────────────────────────────────────────────
 app.use(healthRouter);

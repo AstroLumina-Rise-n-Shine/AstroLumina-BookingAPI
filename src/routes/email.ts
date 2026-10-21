@@ -13,6 +13,7 @@ import os from "os";
 import { env } from "../config/env.js";
 import { Sentry } from "../instrument.js";
 import { createError } from "../middleware/error-handler.js";
+import { escapeHtml } from "../utils/escape-html.js";
 
 const router = Router();
 
@@ -22,18 +23,28 @@ const FROM_EMAIL = "AstroLumina <onboarding@resend.dev>";
 const ASTROLUMINA_EMAIL = "AstroLumina <contact@astrolumina.ro>";
 
 const emailSchema = z.object({
-  to: z.string().email("Invalid email address"),
+  to: z.string().email("Invalid email address").max(254),
   type: z.enum(["ghid-saturn", "soarele-stralucirea-ta"]),
 });
 
 const emailWithAttachmentsSchema = z.object({
-  to: z.string().email("Invalid email address"),
-  subject: z.string().min(1, "Subject is required"),
-  html: z.string().min(1, "HTML content is required"),
+  to: z.string().email("Invalid email address").max(254),
+  subject: z
+    .string()
+    .min(1, "Subject is required")
+    .max(200)
+    // Header-bound value: reject CR/LF so no SMTP header injection.
+    .refine((v) => !/[\r\n]/.test(v), "Subject must not contain CR/LF"),
+  html: z.string().min(1, "HTML content is required").max(100_000),
   attachments: z
-    .array(z.string().url())
-    .min(1, "At least one attachment URL is required"),
+    .array(z.string().url().max(2048))
+    .min(1, "At least one attachment URL is required")
+    .max(5, "At most 5 attachments are allowed"),
 });
+
+const MAX_ATTACHMENTS_TOTAL_BYTES = 25 * 1024 * 1024; // 25 MB per email
+const AXIOS_TIMEOUT_MS = 30_000;
+const DISPLAY_FILENAME_MAX_LENGTH = 100;
 
 const emailTemplates = {
   "ghid-saturn": {
@@ -61,26 +72,63 @@ const emailTemplates = {
   },
 };
 
-async function downloadR2ToLocal(fileUrl: string): Promise<string> {
-  const tempDir = os.tmpdir();
-  const fileName = path.basename(fileUrl);
-  const localPath = path.join(tempDir, fileName);
-
-  const response = await axios({
-    url: fileUrl,
-    method: "GET",
-    responseType: "arraybuffer",
-  });
-
-  await fs.writeFile(localPath, Buffer.from(response.data));
-  return localPath;
+/**
+ * Derive a display filename for the Resend attachment metadata from the URL.
+ * This name is never used in a filesystem path; it is sanitised anyway with
+ * a strict allowlist so it cannot carry control characters or path-like
+ * components into the email metadata.
+ */
+function sanitizeAttachmentFilename(fileUrl: string): string {
+  let rawName: string;
+  try {
+    rawName = new URL(fileUrl).pathname.split("/").pop() ?? "";
+    rawName = decodeURIComponent(rawName);
+  } catch {
+    rawName = "";
+  }
+  const cleaned = rawName
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^\.+/, "_")
+    .slice(0, DISPLAY_FILENAME_MAX_LENGTH);
+  return cleaned.length > 0 ? cleaned : "attachment";
 }
 
-async function cleanupTempFile(filePath: string): Promise<void> {
+/**
+ * Download the attachment into a freshly created private temp directory.
+ * No user-controlled component participates in the filesystem path: the
+ * directory comes from `fs.mkdtemp` and the file has a fixed name
+ * ("attachment"); the user-controlled filename is only kept separately as
+ * display metadata for Resend. The whole directory is cleaned up after
+ * sending, regardless of success or failure.
+ */
+async function downloadR2ToLocal(
+  fileUrl: string,
+): Promise<{ tempDir: string; localPath: string }> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "astrolumina-"));
+  // Fixed filename — never derived from the URL.
+  const localPath = path.join(tempDir, "attachment");
   try {
-    await fs.unlink(filePath);
+    const response = await axios({
+      url: fileUrl,
+      method: "GET",
+      responseType: "arraybuffer",
+      timeout: AXIOS_TIMEOUT_MS,
+      maxContentLength: MAX_ATTACHMENTS_TOTAL_BYTES,
+      maxBodyLength: MAX_ATTACHMENTS_TOTAL_BYTES,
+    });
+    await fs.writeFile(localPath, Buffer.from(response.data));
   } catch (error) {
-    console.error("Failed to delete temp file:", filePath, error);
+    await cleanupTempDir(tempDir);
+    throw error;
+  }
+  return { tempDir, localPath };
+}
+
+async function cleanupTempDir(tempDir: string): Promise<void> {
+  try {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  } catch (error) {
+    console.error("Failed to delete temp directory:", tempDir, error);
   }
 }
 
@@ -145,7 +193,8 @@ router.post(
         attachmentCount: attachments.length,
       });
 
-      const attachmentFiles: string[] = [];
+      const attachmentData: { filename: string; content: string }[] = [];
+      const attachmentTempDirs: string[] = [];
 
       try {
         for (const attachmentUrl of attachments) {
@@ -155,7 +204,8 @@ router.post(
           // SSRF guard: the server fetches this URL itself, so only our own
           // R2 host is allowed. An absolute attacker URL (internal metadata
           // endpoints, LAN hosts, third-party servers) is rejected before
-          // any request leaves the box.
+          // any request leaves the box. Embedded credentials and non-HTTPS
+          // URLs are rejected as well.
           const parsedUrl = new URL(fullUrl);
           if (
             parsedUrl.protocol !== "https:" ||
@@ -163,12 +213,24 @@ router.post(
           ) {
             throw createError(
               400,
-              "Attachment URL must point to our own storage",
+              "Attachment URL must point to our own storage over HTTPS",
+            );
+          }
+          if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+            throw createError(
+              400,
+              "Attachment URL must not contain embedded credentials",
             );
           }
 
-          const localPath = await downloadR2ToLocal(fullUrl);
-          attachmentFiles.push(localPath);
+          const displayName = sanitizeAttachmentFilename(fullUrl);
+          const { tempDir, localPath } = await downloadR2ToLocal(fullUrl);
+          attachmentTempDirs.push(tempDir);
+
+          attachmentData.push({
+            filename: displayName,
+            content: (await fs.readFile(localPath)).toString("base64"),
+          });
         }
 
         const data = await resend.emails.send({
@@ -176,18 +238,15 @@ router.post(
           to: to,
           subject: subject,
           html: html,
-          attachments: await Promise.all(
-            attachmentFiles.map(async (filePath) => ({
-              filename: path.basename(filePath),
-              content: (await fs.readFile(filePath)).toString("base64"),
-            })),
-          ),
+          attachments: attachmentData,
         });
 
         res.json({ success: true, data });
       } finally {
-        for (const filePath of attachmentFiles) {
-          await cleanupTempFile(filePath);
+        // Clean up the whole temp directories (each download lives in its
+        // own mkdtemp directory, so recursive removal is safe).
+        for (const tempDir of attachmentTempDirs) {
+          await cleanupTempDir(tempDir);
         }
       }
     } catch (error) {
@@ -203,18 +262,15 @@ router.post(
 const contactSchema = z.object({
   name: z.string().trim().min(2, "Name is required").max(100),
   email: z.string().trim().email("Invalid email address").max(254),
-  subject: z.string().trim().min(3, "Subject is required").max(150),
+  subject: z
+    .string()
+    .trim()
+    .min(3, "Subject is required")
+    .max(150)
+    // Header-bound value: reject CR/LF so no SMTP header injection.
+    .refine((v) => !/[\r\n]/.test(v), "Subject must not contain CR/LF"),
   message: z.string().trim().min(10, "Message is too short").max(5000),
 });
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 router.post(
   "/send-contact-email",
