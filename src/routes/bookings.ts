@@ -40,19 +40,31 @@ function pruneEmptyMetadata(
 const createBookingSchema = z
   .object({
     /** Optional if you send sessionKey — same mechanism as /api/availability/slots/session/:key */
-    sessionKey: z.string().min(1).optional(),
+    sessionKey: z.string().min(1).max(100).optional(),
     eventTypeId: z.number().int().positive().optional(),
-    start: z.string().min(1, "Start time is required (ISO 8601)"),
+    start: z
+      .string()
+      .min(1, "Start time is required (ISO 8601)")
+      .max(64)
+      // Passed into upstream API URLs/headers downstream: reject CR/LF.
+      .refine((v) => !/[\r\n]/.test(v), "Start time must not contain CR/LF"),
     attendee: z.object({
-      name: z.string().min(1, "Attendee name is required"),
-      email: z.string().email("Valid attendee email is required"),
-      timeZone: z.string().min(1, "Time zone is required"),
-      phoneNumber: z.string().optional(),
-      language: z.string().optional(),
+      name: z
+        .string()
+        .min(1, "Attendee name is required")
+        .max(100)
+        .refine((v) => !/[\r\n]/.test(v), "Attendee name must not contain CR/LF"),
+      email: z.string().email("Valid attendee email is required").max(254),
+      timeZone: z.string().min(1, "Time zone is required").max(64),
+      phoneNumber: z.string().max(32).optional(),
+      language: z.string().max(10).optional(),
     }),
     metadata: z.record(z.string()).optional(),
     bookingFieldsResponses: z.record(z.unknown()).optional(),
-    guests: z.array(z.string().email()).optional(),
+    guests: z
+      .array(z.string().email().max(254))
+      .max(10, "At most 10 guests are allowed")
+      .optional(),
   })
   .refine(
     (data) =>
@@ -65,13 +77,17 @@ const createBookingSchema = z
   );
 
 const rescheduleBookingSchema = z.object({
-  start: z.string().min(1, "New start time is required (ISO 8601 UTC)"),
-  rescheduledBy: z.string().email().optional(),
-  reschedulingReason: z.string().optional(),
+  start: z
+    .string()
+    .min(1, "New start time is required (ISO 8601 UTC)")
+    .max(64)
+    .refine((v) => !/[\r\n]/.test(v), "Start time must not contain CR/LF"),
+  rescheduledBy: z.string().email().max(254).optional(),
+  reschedulingReason: z.string().max(500).optional(),
 });
 
 const bookingUidSchema = z.object({
-  uid: z.string().min(1, "Booking UID is required"),
+  uid: z.string().min(1, "Booking UID is required").max(100),
 });
 
 // ─── Routes ─────────────────────────────────────────────────

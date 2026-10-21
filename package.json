@@ -27,6 +27,7 @@
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
+    "escape-html": "^1.0.3",
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.1",
     "helmet": "^8.1.0",
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
+    "@types/escape-html": "^1.0.4",
     "@types/express": "^5.0.6",
     "@types/morgan": "^1.9.10",
     "@types/node": "^22.15.0",

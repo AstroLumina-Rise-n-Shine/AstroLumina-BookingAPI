@@ -41,7 +41,7 @@ export function payloadTooLargeHandler(
   ) {
     res
       .status(413)
-      .json({ error: "Request payload too large. Maximum size is 1MB." });
+      .json({ error: "Request payload too large. Maximum size is 256KB." });
     return;
   }
   next(err);

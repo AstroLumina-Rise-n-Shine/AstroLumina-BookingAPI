@@ -21,9 +21,10 @@
 # Security (GHAS). Without it, SARIF uploads are skipped by GitHub —
 # Semgrep / npm audit / Trivy / ZAP results (logs + artifacts) still work.
 #
-# The workflow is REPORT-ONLY on purpose: it never fails on findings.
-# To gate merges, enforce this workflow as a required status check and/or flip
-# the Trivy `exit-code` inputs from '0' to '1'.
+# The workflow is BLOCKING: Semgrep (--error), npm audit (--audit-level=moderate),
+# Trivy (exit-code: 1 on CRITICAL,HIGH) and the ZAP baseline (-I, failures only)
+# all fail the job on findings. The scans are intended to be enforced as
+# required status checks for merges to main.
 # =============================================================================
 
 name: Security Scan
@@ -72,14 +73,13 @@ jobs:
           python -m venv /tmp/semgrep-venv
           /tmp/semgrep-venv/bin/pip install --quiet semgrep
 
-      - name: Semgrep scan (report only)
+      - name: Semgrep scan (blocking)
         # Explicit ruleset `p/default`: `--config auto` refuses to run with
-        # metrics off, and metrics stay off here. Findings exit non-zero,
-        # which is not a failure (see continue-on-error).
-        continue-on-error: true
+        # metrics off, and metrics stay off here. With `--error` any finding
+        # fails the step.
         env:
           SEMGREP_SEND_METRICS: off
-        run: /tmp/semgrep-venv/bin/semgrep scan --config p/default --sarif --output semgrep.sarif
+        run: /tmp/semgrep-venv/bin/semgrep scan --config p/default --error --sarif --output semgrep.sarif
 
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
@@ -107,9 +107,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: npm audit (report only)
+      - name: npm audit (blocking)
+        run: npm audit --audit-level=moderate
+
+      - name: npm audit report (always generated for the artifact)
+        if: always()
         run: |
-          npm audit --audit-level=moderate || true
           npm audit --audit-level=moderate --json > npm-audit.json || true
 
       - name: Upload npm audit report
@@ -120,7 +123,7 @@ jobs:
           path: npm-audit.json
           retention-days: 30
 
-      - name: Trivy repo scan — vuln, secrets, misconfig (report only)
+      - name: Trivy repo scan — vuln, secrets, misconfig (blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
         with:
           scan-type: fs
@@ -130,7 +133,7 @@ jobs:
           limit-severities-for-sarif: 'true'
           format: sarif
           output: trivy-fs.sarif
-          exit-code: "0"
+          exit-code: "1"
 
       - name: Upload Trivy repo SARIF to code scanning
         uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
@@ -163,7 +166,7 @@ jobs:
           load: true
           tags: booking-api:security-scan
 
-      - name: Trivy image scan (report only)
+      - name: Trivy image scan (blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
         with:
           scan-type: image
@@ -173,7 +176,7 @@ jobs:
           limit-severities-for-sarif: 'true'
           format: sarif
           output: trivy-image.sarif
-          exit-code: "0"
+          exit-code: "1"
 
       - name: Upload Trivy image SARIF to code scanning
         uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
@@ -254,10 +257,10 @@ jobs:
           cat api.log
           exit 1
 
-      - name: OWASP ZAP baseline scan (report only)
-        # ZAP exits non-zero on findings — findings are not failures here.
+      - name: OWASP ZAP baseline scan (blocking)
+        # ZAP exits non-zero on failures; `-I` keeps WARNINGS visible in the
+        # report while only FAILs block the job.
         # --network host lets the ZAP container reach the API on localhost.
-        continue-on-error: true
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
@@ -266,6 +269,7 @@ jobs:
             -v "${{ github.workspace }}/zap-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
+              -I \
               -t "http://localhost:${BOOKING_API_SERVER_PORT}" \
               -r baseline-report.html \
               -J baseline-report.json
