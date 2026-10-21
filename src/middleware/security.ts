@@ -44,13 +44,22 @@ export const permissionsPolicy = (
 };
 
 // ─── CORS ─────────────────────────────────────────────────────
+// Strictly linear replacement for the `/(...)\/+$/` regexes CodeQL flags as
+// polynomial on uncontrolled data: trim trailing U+002F ('/') by walking the
+// string once from the end.
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 // Normalise an origin list: trim whitespace, drop empty entries, strip a
 // trailing slash, and keep only well-formed http/https URLs.
 function normalizeOrigins(raw: string[]): string[] {
   const origins = raw
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
-    .map((value) => value.replace(/\/+$/, ""));
+    .map((value) => stripTrailingSlashes(value));
 
   for (const origin of origins) {
     if (!/^https?:\/\//.test(origin) || !URL.canParse(origin)) {
@@ -83,7 +92,7 @@ export const originGuard = (
 ): void => {
   const origin = req.headers["origin"];
   if (typeof origin === "string" && origin.length > 0) {
-    if (!corsOrigins.includes(origin.replace(/\/+$/, ""))) {
+    if (!corsOrigins.includes(stripTrailingSlashes(origin))) {
       res.status(403).json({ error: "Origin not allowed" });
       return;
     }
