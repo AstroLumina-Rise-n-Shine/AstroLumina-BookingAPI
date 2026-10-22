@@ -69,17 +69,24 @@ jobs:
           python-version: "3.x"
 
       - name: Install Semgrep
+        # Pinned to 1.182.0: latest Semgrep releases intermittently crash
+        # semgrep-core on GitHub runners (exit without findings — the main
+        # scans of the Astrology and Payment APIs failed that way), so the
+        # version is frozen alongside the known-good sibling workflows.
         run: |
           python -m venv /tmp/semgrep-venv
-          /tmp/semgrep-venv/bin/pip install --quiet semgrep
+          /tmp/semgrep-venv/bin/pip install --quiet "semgrep==1.182.0"
 
       - name: Semgrep scan (blocking)
         # Explicit ruleset `p/default`: `--config auto` refuses to run with
         # metrics off, and metrics stay off here. With `--error` any finding
-        # fails the step.
+        # fails the step. `--jobs 1` caps the scan at a single worker to
+        # avoid the intermittent semgrep-core crash seen on parallel
+        # GitHub runners — deterministic and crash-resistant, matching the
+        # sibling APIs.
         env:
           SEMGREP_SEND_METRICS: off
-        run: /tmp/semgrep-venv/bin/semgrep scan --config p/default --error --sarif --output semgrep.sarif
+        run: /tmp/semgrep-venv/bin/semgrep scan --config p/default --error --jobs 1 --sarif --output semgrep.sarif
 
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
