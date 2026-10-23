@@ -2,14 +2,14 @@
 # AstroLumina BookingAPI - Dockerfile
 # =============================================================================
 
-FROM node:24-alpine AS deps
+FROM node:24.22.1-alpine3.24 AS deps
 WORKDIR /app
 RUN apk add --no-cache python3 make g++
 
 COPY package.json package-lock.json ./
 RUN npm ci --only=production
 
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine3.24 AS builder
 WORKDIR /app
 
 RUN apk add --no-cache python3 make g++
@@ -20,7 +20,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node:24-alpine AS runner
+FROM node:24.22.1-alpine3.24 AS runner
 WORKDIR /app
 
 RUN addgroup -g 1001 -S nodejs && \
