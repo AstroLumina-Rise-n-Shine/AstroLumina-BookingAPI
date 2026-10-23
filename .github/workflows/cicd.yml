@@ -1,129 +1,425 @@
-name: Promote Staging
+name: CICD
 
-# CD: promotes the freshly built image to staging (idle color bump + live
-# flip) in Kubernetes, Helm and Docker Compose. Runs only after the
-# "Build and Deploy" pipeline finishes SUCCESSFULLY for a PR merged into
-# main; anything else (failure, cancellation, PR without merge) never
-# promotes.
-# NOTE: there is intentionally NO `branches` filter on the workflow_run
-# trigger below. The upstream pipeline runs on pull_request events, so its
-# head_branch is the PR *source* branch, never `main` -- a branches:[main]
-# filter would never match and promotion would silently never run. The
-# main-targeting is enforced instead by the gate on the `resolve` job.
-# The promoted version is resolved once from the git tag on the merge commit
-# (the upstream head_sha is the PR head; the tag lives on main HEAD), then
-# shared by three parallel jobs -- one per
-# target repo, each with that repo's own checkout, bump logic, branch and
-# pull request. Merge stays manual: the branch-protection rule on main is
-# untouched, a human merges each promotion PR.
+# Pull requests run tests and blocking scans. Scan-only local containers are
+# built where needed; release images and staging promotions run only on main.
 on:
-  workflow_run:
-    workflows: ["Build and Deploy"]
-    types: [completed]
-    # No `branches` filter here -- see NOTE above.
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
 
-# Serialize promotions: two builds finishing back-to-back must promote in
-# order, never interleaved (queued runs wait, none is cancelled).
+permissions:
+  contents: read
+
+# Serialize main releases/promotions so tag creation and staging updates stay ordered.
 concurrency:
-  group: promote-staging
+  group: cicd-${{ github.ref }}
   cancel-in-progress: false
 
-# Service identity shared by all promote jobs.
 env:
+  NODE_VERSION: "24"
   SVC_NAME: booking-api
   SVC_FILE: 30-booking-api-deployment.yaml
   ROUTER: booking
   TAG_PREFIX: BOOKING_API
 
 jobs:
-  resolve:
-    # Gate: only a successful upstream pipeline reaches this job. Whether that
-    # run was a real merge into main is decided by the gate step below via the
-    # API -- the workflow_run payload cannot tell us: for runs triggered by a
-    # closed PR, GitHub sends an empty `pull_requests` array (the PR is no
-    # longer open), so any `pull_requests[0]` check silently never matches.
-    if: >-
-      github.event.workflow_run.conclusion == 'success'
+  version:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    # Only shipped code or Docker inputs create a version and image.
+    # Tests, docs, GitHub configuration and CI-only settings are excluded.
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      code_changed: ${{ steps.changes.outputs.code }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for shipped or Docker input changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Compare the prior main tip with the pushed main tip. This covers
+          # the resulting tree of merge commits, including merge resolutions.
+          base="$BASE_SHA"
+          head="$HEAD_SHA"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+            echo "Initial main push -- treating all files as changed."
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --quiet origin "$base" "$head" || {
+            echo "ERROR: could not fetch the before/after commits; refusing to guess."
+            exit 1
+          }
+          files=$(git diff --name-only "$base" "$head") || {
+            echo "ERROR: cannot diff $base against $head; refusing to guess."
+            exit 1
+          }
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              test/*|tests/*|*/test/*|*/tests/*|__tests__/*|*/__tests__/*|*.test.*|*.spec.*|*.md|*.rst|*.adoc|docs/*|*/docs/*|.github/*|.gitignore|.trivyignore|.editorconfig|.prettier*|.eslint*|eslint.config.*|prettier.config.*|.markdownlint*|.yamllint*|.shellcheckrc|.hadolint.yaml|jest.config.*|vitest.config.*) ;;
+              *) code=true; break ;;
+            esac
+          done <<< "$files"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Shipped or Docker input changed: $code"
+
+      - name: Read version and create tag
+        id: version
+        run: |
+          major=$(jq -r '.major' VERSION.json)
+          minor=$(jq -r '.minor' VERSION.json)
+
+          latest=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+          if [ "${{ steps.changes.outputs.code }}" = "true" ]; then
+            current_patch=$(echo "$latest" | cut -d. -f3)
+            new_patch=${current_patch:-0}
+            new_patch=$((new_patch + 1))
+
+            new_version="v${major}.${minor}.${new_patch}"
+            echo "version=$new_version" >> $GITHUB_OUTPUT
+            echo "New version: $new_version"
+          else
+            echo "version=v$latest" >> $GITHUB_OUTPUT
+            echo "CI-only change -- reusing latest tag v$latest, no new version."
+          fi
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push tag
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          git tag ${{ steps.version.outputs.version }}
+          git push origin ${{ steps.version.outputs.version }}
+
+
+  docker:
+    needs: version
+    # No new version, no new image: docs/infra-only merges end in the
+    # `version` job above (green, but without tag or image).
+    if: needs.version.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-    outputs:
-      version: ${{ steps.ver.outputs.version }}
-      promote: ${{ steps.gate.outputs.promote }}
+      packages: write
+
     steps:
-      - name: Find the merged PR for the built commit
-        # The upstream `head_sha` is the PR *head* commit, but the build
-        # pipeline cuts the version tag on main HEAD (the squash-merge
-        # commit) -- so the tag NEVER points at head_sha and a lookup on it
-        # always misses. Resolve the merge commit through the API and use IT
-        # for the tag lookup below. Closed-but-unmerged PRs have no merged PR
-        # here and stop the flow.
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          sha="${{ github.event.workflow_run.head_sha }}"
-          pr=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
-            --jq '[.[] | select(.merged_at != null and .base.ref == "main")][0].number // empty')
-          if [ -z "$pr" ]; then
-            echo "Head commit $sha is not a merge into main -- skipping promotion."
-          else
-            merge_sha=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.merge_commit_sha // empty')
-            # Rebase merges have no merge commit: fall back to the head
-            # itself (only squash and merge-commit flows are supported).
-            [ -z "$merge_sha" ] && merge_sha="$sha"
-            echo "pr=$pr" >> "$GITHUB_OUTPUT"
-            echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
-            echo "Head commit $sha merged into main via PR #$pr (merge commit $merge_sha)."
-          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.version.outputs.version }}
+          fetch-depth: 0
 
-      - name: Resolve built version from git tag
-        # Backstop for docs/infra-only merges: the build pipeline cuts a tag
-        # only for application-code changes, and plain `git describe` would
-        # happily return an OLD tag for an untagged commit (re-promoting it).
-        # Require a version tag pointing EXACTLY at the merge commit.
-        id: ver
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{ version }},value=${{ needs.version.outputs.version }}
+            type=semver,pattern={{ major }}.{{ minor }}
+            type=semver,pattern={{ major }}
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  sast-semgrep:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    name: SAST / Semgrep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Semgrep scan (blocking)
+        # Docker image `semgrep/semgrep:1.182.0` instead of pip-installed
+        # Semgrep: on GitHub runners the pip `semgrep-core` binary
+        # intermittently segfaults (exit code -11) — even pinned and with
+        # `--jobs 1` — while the official container's bundled core-binary
+        # is reliable. Explicit ruleset `p/default`: `--config auto` refuses
+        # to run with metrics off, and metrics stay off here (env below).
+        # `--error` fails the step on any finding; `--jobs 1` caps the scan
+        # at a single worker for deterministic runs, matching the sibling
+        # APIs.
         run: |
-          sha="${{ steps.pr.outputs.merge_sha }}"
-          if [ -z "$sha" ]; then
-            echo "tagged=false" >> "$GITHUB_OUTPUT"
-            echo "No merged PR resolved -- nothing to promote."
-          else
-            # No checkout of PR-controlled code anywhere in this job: tags are
-            # listed remotely instead (keeps Semgrep
-            # workflow-run-target-code-checkout quiet by construction).
-            # Peeled ^{} SHAs cover annotated tags, plain SHAs cover
-            # lightweight ones; still requires a version tag on EXACTLY the
-            # merge commit, same semantics as `git tag --points-at`.
-            ver=$(git ls-remote --tags "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
-              | awk -v sha="$sha" '{ n=$2; sub(/^refs\/tags\//, "", n); sub(/\^\{\}$/, "", n); if ($1 == sha) print n }' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
-            if [ -z "$ver" ]; then
-              echo "tagged=false" >> "$GITHUB_OUTPUT"
-              echo "No version tag on merge commit $sha (docs/infra-only change) -- nothing to promote."
-            else
-              echo "tagged=true" >> "$GITHUB_OUTPUT"
-              echo "version=$ver" >> "$GITHUB_OUTPUT"
-              echo "Promoting version: $ver"
+          docker run --rm \
+            -e SEMGREP_SEND_METRICS=off \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            semgrep/semgrep:1.182.0 \
+            semgrep scan --config p/default --error --jobs 1 --sarif --output semgrep.sarif
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1b. STATIC — Software Composition Analysis (dependencies, secrets, IaC)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sca:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    name: SCA / npm audit + Trivy repo
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: npm audit (blocking)
+        run: npm audit --audit-level=moderate
+
+      - name: npm audit report (always generated for the artifact)
+        if: always()
+        run: |
+          npm audit --audit-level=moderate --json > npm-audit.json || true
+
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+          retention-days: 30
+
+      - name: Trivy repo scan — vuln, secrets, misconfig (blocking)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: 'true'
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "1"
+
+      - name: Upload Trivy repo SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. DOCKER — build the production image, scan it with Trivy
+  # ─────────────────────────────────────────────────────────────────────────
+
+  docker-scan:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    name: Docker / Trivy image scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image (local only, no push)
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: booking-api:security-scan
+
+      - name: Trivy image scan (blocking)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
+        with:
+          scan-type: image
+          image-ref: booking-api:security-scan
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: 'true'
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "1"
+
+      - name: Upload Trivy image SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@d8073367669608af8fbcc5f63dd0a0d52bb90cff # v4
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. DYNAMIC — boot the API, run OWASP ZAP baseline scan against it
+  #
+  # The app validates env strictly (zod) but never calls Cal.com/Resend/
+  # R2/D1/Sentry at boot, so syntactically-valid dummy values are enough
+  # for a baseline crawl of: GET /, GET /health, 404 handling.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  dast-zap:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    name: DAST / OWASP ZAP baseline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NODE_ENV: development
+      BOOKING_API_SERVER_PORT: "3102"
+      # Dummy but URL-valid DSN — SDK init succeeds, events go nowhere.
+      BOOKING_API_SENTRY_DSN: https://00000000000000000000000000000000@o0.ingest.sentry.io/0
+      # Dummy Booking values — satisfy the zod schema; no external call possible.
+      RESEND_API_KEY: dummy_key_for_ci_scan_only
+      CALCOM_API_KEY: dummy_key_for_ci_scan_only
+      CALCOM_BASE_URL: https://ci.local
+      R2_BASE_URL: https://ci.local
+      D1_ACCOUNT_ID: dummy_account_for_ci_scan_only
+      D1_DATABASE_ID: dummy_database_for_ci_scan_only
+      D1_API_TOKEN: dummy_token_for_ci_scan_only
+      # Dummy CORS endpoint pairs — only schema validation; no traffic.
+      ASTROLOGY_API_SERVER_DC_PORT: "3101"
+      ASTROLOGY_API_SERVER_DC_DNS: ci.local
+      ASTROLOGY_API_SERVER_K8S_PORT: "3101"
+      ASTROLOGY_API_SERVER_K8S_DNS: ci.local
+      BOOKING_API_SERVER_DC_PORT: "3102"
+      BOOKING_API_SERVER_DC_DNS: ci.local
+      BOOKING_API_SERVER_K8S_PORT: "3102"
+      BOOKING_API_SERVER_K8S_DNS: ci.local
+      PAYMENT_API_SERVER_DC_PORT: "3000"
+      PAYMENT_API_SERVER_DC_DNS: ci.local
+      PAYMENT_API_SERVER_K8S_PORT: "3000"
+      PAYMENT_API_SERVER_K8S_DNS: ci.local
+      FRONTEND_SERVER_DC_PORT: "3103"
+      FRONTEND_SERVER_DC_DNS: ci.local
+      FRONTEND_SERVER_K8S_PORT: "3103"
+      FRONTEND_SERVER_K8S_DNS: ci.local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start API and wait for health
+        run: |
+          node dist/server.js > api.log 2>&1 &
+          echo $! > api.pid
+          for i in $(seq 1 30); do
+            if curl -fs "http://localhost:${BOOKING_API_SERVER_PORT}/health" > /dev/null; then
+              echo "API is up on port ${BOOKING_API_SERVER_PORT}"
+              exit 0
             fi
-          fi
+            sleep 2
+          done
+          echo "API failed to start — log:"
+          cat api.log
+          exit 1
 
-      - name: Decide promotion
-        id: gate
+      - name: OWASP ZAP baseline scan (blocking)
+        # ZAP exits non-zero on failures; `-I` keeps WARNINGS visible in the
+        # report while only FAILs block the job.
+        # --network host lets the ZAP container reach the API on localhost.
         run: |
-          if [ -n "${{ steps.pr.outputs.pr }}" ] && [ "${{ steps.ver.outputs.tagged }}" = "true" ]; then
-            echo "promote=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "promote=false" >> "$GITHUB_OUTPUT"
-          fi
+          mkdir -p zap-reports
+          chmod 777 zap-reports
+          docker run --rm \
+            --network host \
+            -v "${{ github.workspace }}/zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -I \
+              -t "http://localhost:${BOOKING_API_SERVER_PORT}" \
+              -r baseline-report.html \
+              -J baseline-report.json
 
+      - name: Stop API
+        if: always()
+        run: kill "$(cat api.pid)" 2>/dev/null || true
+
+      - name: Upload ZAP reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: zap-baseline-reports
+          path: zap-reports/
+          retention-days: 30
+
+  unit-tests:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
 
   promote-kubernetes:
     # Reads the live color from the *-live Service (parsed as YAML), bumps
     # the image on the idle Deployment, flips the selector. Staging only.
-    needs: resolve
-    if: needs.resolve.outputs.promote == 'true'
+    needs: [version, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -143,7 +439,7 @@ jobs:
 
       - name: Bump idle color and flip live (staging)
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -232,12 +528,13 @@ jobs:
                 --body "Automated staging promotion of ${{ env.SVC_NAME }} to ${{ env.NEW_TAG }} (idle color ${{ env.IDLE_COLOR }}, live flipped). Merge to deploy to staging."
             fi
           fi
+
   promote-helm:
     # Reads this service's live color from blueGreen.liveColors in
     # values-staging.yaml (parsed as YAML), bumps the idle color tag for
     # this service only, flips only its live color. Staging only.
-    needs: resolve
-    if: needs.resolve.outputs.promote == 'true'
+    needs: [version, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -257,7 +554,7 @@ jobs:
 
       - name: Bump idle color and flip live (staging)
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -356,12 +653,13 @@ jobs:
                 --body "Automated staging promotion of ${{ env.SVC_NAME }} to ${{ env.NEW_TAG }} (idle color ${{ env.IDLE_COLOR }}, live flipped). Merge to deploy to staging."
             fi
           fi
+
   promote-compose:
     # Reads the live color from the app router in routes.yml (parsed as
     # YAML), bumps the idle tag in versions.env, flips the router. Staging
     # only.
-    needs: resolve
-    if: needs.resolve.outputs.promote == 'true'
+    needs: [version, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -381,7 +679,7 @@ jobs:
 
       - name: Bump idle color and flip live (staging)
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           python3 - <<'PYEOF'
           import os
