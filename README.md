@@ -1,20 +1,8 @@
 # AstroLumina-BookingAPI
 
-> **Documentația completă a proiectului se află în [Wiki](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki).**
->
-> Acest fișier conține doar o referință rapidă. Toate detaliile arhitecturale, ghidurile de deployment, configurațiile de securitate și diagramele Mermaid sunt publicate în Wiki pentru o navigare ușoară și versionare istorică.
+Express API for AstroLumina booking, email, and document workflows. See the [project Wiki](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki) for:
 
----
-
-## Quick Links
-
-- [Wiki Home](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki)
-- [Architecture](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Architecture) (dacă există)
-- [Development](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Development) (dacă există)
-- [Deployment](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Deployment) (dacă există)
-- [Security](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Security) (dacă există)
-
----
-
-*Ultima actualizare: 2026-10-23*
-
+- [Architecture](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Architecture)
+- [Development](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Development)
+- [Security](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Security)
+- [Deployment](https://github.com/AstroLumina-Rise-n-Shine/AstroLumina-BookingAPI/wiki/Deployment)
