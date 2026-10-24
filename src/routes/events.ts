@@ -19,7 +19,11 @@ const attendeeSchema = z.object({
     .min(1, "Full name is required")
     .max(100)
     .refine((v) => !/[\r\n]/.test(v), "Name must not contain CR/LF"),
-  email: z.coerce.string().email().max(254).nullable().optional(),
+  email: z.coerce
+    .string()
+    .pipe(z.string().email().max(254))
+    .nullable()
+    .optional(),
   phone: z.coerce.string().max(32).nullable().optional(),
   paymentIntentId: z.coerce.string().max(100).nullable().optional(),
 });

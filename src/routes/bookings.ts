@@ -59,8 +59,8 @@ const createBookingSchema = z
       phoneNumber: z.string().max(32).optional(),
       language: z.string().max(10).optional(),
     }),
-    metadata: z.record(z.string()).optional(),
-    bookingFieldsResponses: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
+    bookingFieldsResponses: z.record(z.string(), z.unknown()).optional(),
     guests: z
       .array(z.string().email().max(254))
       .max(10, "At most 10 guests are allowed")
