@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import axios from "axios";
 import { env } from "../config/env.js";
 
-function calComErrorMessage(data: unknown): string | undefined {
+export function calComErrorMessage(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const o = data as Record<string, unknown>;
   const err = o["error"];
