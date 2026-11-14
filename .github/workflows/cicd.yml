@@ -656,6 +656,51 @@ jobs:
             fi
           fi
 
+  sentry-release:
+    # Creates a Sentry release, injects and uploads source maps.
+    # Runs only when code changes are merged to main (new version tag created).
+    needs: [version, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.version.outputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project (produces source maps in dist/)
+        run: npm run build
+
+      - name: Create Sentry release
+        uses: getsentry/action-release@v2
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_ORG_TOKEN }}
+          SENTRY_ORG: astrolumina
+          SENTRY_PROJECT: astrolumina-booking-api
+        with:
+          version: ${{ needs.version.outputs.version }}
+          projects: astrolumina-booking-api
+          finalize: true
+
+      - name: Inject source maps
+        run: |
+          npx @sentry/cli sourcemaps inject --org astrolumina --project astrolumina-booking-api dist/
+
+      - name: Upload source maps
+        run: |
+          npx @sentry/cli sourcemaps upload --org astrolumina --project astrolumina-booking-api dist/
+
   promote-compose:
     # Reads the live color from the app router in routes.yml (parsed as
     # YAML), bumps the idle tag in versions.env, flips the router. Staging

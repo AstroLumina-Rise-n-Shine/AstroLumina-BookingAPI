@@ -16,13 +16,14 @@ if (env.BOOKING_API_SENTRY_DSN) {
     maxBreadcrumbs: 100,
 
     tracesSampler: (samplingContext) => {
+      // Sample 100% of booking endpoints
+      if (samplingContext?.transactionContext?.name?.includes("/api/")) {
+        return 1.0;
+      }
       if (samplingContext?.transactionContext?.name?.includes("/health")) {
         return 0.01;
       }
-      if (samplingContext?.transactionContext?.name?.includes("/api/")) {
-        return isProduction ? 0.2 : 1.0;
-      }
-      return isProduction ? 0.1 : 1.0;
+      return isProduction ? 0.2 : 1.0;
     },
 
     tracePropagationTargets: [
@@ -32,6 +33,13 @@ if (env.BOOKING_API_SENTRY_DSN) {
       /^https:\/\/develop\.astrolumina\.pages\.dev/,
       /^https:\/\/.*\.astrolumina\.com/,
       /^https:\/\/.*\.astrolumina\.ro/,
+    ],
+
+    allowedDomains: [
+      "astrolumina.ro",
+      "www.astrolumina.ro",
+      "localhost",
+      "127.0.0.1",
     ],
 
     integrations: [
