@@ -10,6 +10,7 @@ if (env.BOOKING_API_SENTRY_DSN) {
   Sentry.init({
     dsn: env.BOOKING_API_SENTRY_DSN,
     environment: env.NODE_ENV,
+    release: env.SENTRY_RELEASE || undefined,
 
     sampleRate: 1.0,
     includeLocalVariables: true,
@@ -33,13 +34,6 @@ if (env.BOOKING_API_SENTRY_DSN) {
       /^https:\/\/develop\.astrolumina\.pages\.dev/,
       /^https:\/\/.*\.astrolumina\.com/,
       /^https:\/\/.*\.astrolumina\.ro/,
-    ],
-
-    allowedDomains: [
-      "astrolumina.ro",
-      "www.astrolumina.ro",
-      "localhost",
-      "127.0.0.1",
     ],
 
     integrations: [
