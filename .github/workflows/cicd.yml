@@ -689,7 +689,7 @@ jobs:
         # mutable action tags. `inject` writes Debug IDs into the build output
         # and `sourcemaps` uploads the matching maps in the same step, so the
         # release, the files and the maps always agree.
-        uses: getsentry/action-release@e3542deb6dd46200cca4bd79d4096d4bdb92e1b7 # v2.0.0
+        uses: getsentry/action-release@e3542deb6dd46200cca4bd79d4096d4bdb92e1b7
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_ORG_TOKEN }}
           SENTRY_ORG: astrolumina

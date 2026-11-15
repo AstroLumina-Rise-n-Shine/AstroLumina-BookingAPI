@@ -54,9 +54,14 @@ describe("SESSION_SLUGS", () => {
 });
 
 describe("SESSION_SLUG_ALIASES", () => {
-  it("is an object (may be empty)", () => {
-    assert.ok(typeof SESSION_SLUG_ALIASES === "object");
-    assert.ok(SESSION_SLUG_ALIASES !== null);
+  it("maps each alias to a non-empty list of slugs", () => {
+    for (const [alias, targets] of Object.entries(SESSION_SLUG_ALIASES)) {
+      assert.ok(alias.length > 0, `empty alias key`);
+      assert.ok(Array.isArray(targets) && targets.length > 0, `no targets for ${alias}`);
+      for (const target of targets) {
+        assert.ok(target.length > 0, `empty target slug for ${alias}`);
+      }
+    }
   });
 });
 
