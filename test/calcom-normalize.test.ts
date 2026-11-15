@@ -1,45 +1,24 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import "./setup-env-process.js";
 
-// Pure normalization functions from calcom.ts (no axios import needed)
-function unwrapData<T>(body: unknown): T | undefined {
-  if (body && typeof body === "object" && "data" in body) {
-    return (body as { data: T }).data;
-  }
-  return undefined;
-}
+import {
+  unwrapData,
+  normalizeSlotEntry,
+  normalizeSlotsBody,
+  normalizeBookingV2,
+} from "../src/services/calcom.js";
 
-function normalizeSlotEntry(item: unknown): { start: string; end?: string } {
-  if (item && typeof item === "object" && "start" in item) {
-    const o = item as { start: string; end?: string };
-    return { start: o.start, end: o.end ?? o.start };
-  }
-  const s = String(item);
-  return { start: s, end: s };
-}
+describe("calcom unwrapData", () => {
+  it("returns the data payload when present", () => {
+    assert.deepEqual(unwrapData({ data: { a: 1 } }), { a: 1 });
+  });
 
-function normalizeSlotsBody(body: unknown): Record<string, { start: string; end?: string }[]> {
-  const map =
-    unwrapData<Record<string, unknown>>(body) ??
-    (body as Record<string, unknown>);
-  if (!map || typeof map !== "object") {
-    return {};
-  }
-  const out: Record<string, { start: string; end?: string }[]> = {};
-  for (const [date, slots] of Object.entries(map)) {
-    if (!Array.isArray(slots)) continue;
-    out[date] = slots.map(normalizeSlotEntry);
-  }
-  return out;
-}
-
-function normalizeBookingV2(raw: unknown): { startTime: string; endTime: string } {
-  const b = raw as { startTime?: string; endTime?: string; start?: string; end?: string };
-  return {
-    startTime: b.startTime ?? b.start ?? "",
-    endTime: b.endTime ?? b.end ?? "",
-  };
-}
+  it("returns undefined without a data wrapper", () => {
+    assert.equal(unwrapData({ a: 1 }), undefined);
+    assert.equal(unwrapData(null), undefined);
+  });
+});
 
 describe("calcom normalizeSlotEntry", () => {
   it("normalizes object with start and end", () => {

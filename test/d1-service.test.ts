@@ -1,72 +1,46 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import "./setup-env-process.js";
 
-// Pure D1 response parsing logic extracted from d1.ts (no axios import needed)
-function parseBooked(raw: unknown): number {
-  if (raw === null || raw === undefined || Number.isNaN(Number(raw))) return 0;
-  return Math.max(0, Math.trunc(Number(raw)));
-}
+import {
+  MAX_SEATS,
+  parseBooked,
+  extractResults,
+} from "../src/services/d1.js";
 
-function extractResults(result: unknown): unknown[] {
-  if (!result || typeof result !== "object") return [];
-  const r = result as { result?: { results?: unknown[] }[] };
-  const first = r.result?.[0];
-  return first?.results ?? [];
-}
-
-function isSuccess(result: unknown): boolean {
-  if (!result || typeof result !== "object") return false;
-  return (result as { success?: boolean }).success === true;
-}
-
-const MAX_SEATS = 20;
-
-function getAvailableSeatsFromResult(result: unknown): number {
-  if (!isSuccess(result)) throw new Error("D1 query failed");
-  const rows = extractResults(result);
-  const raw = rows[0]?.booked;
-  const booked = parseBooked(raw);
-  return MAX_SEATS - booked;
-}
-
-describe("D1 parseBooked", () => {
+describe("parseBooked", () => {
   it("returns count from numeric value", () => {
     assert.equal(parseBooked(5), 5);
     assert.equal(parseBooked(0), 0);
   });
 
-  it("returns 0 for null", () => {
+  it("returns 0 for null and undefined", () => {
     assert.equal(parseBooked(null), 0);
-  });
-
-  it("returns 0 for undefined", () => {
     assert.equal(parseBooked(undefined), 0);
   });
 
-  it("returns 0 for NaN", () => {
-    assert.equal(parseBooked(NaN), 0);
+  it("returns 0 for non-numeric values", () => {
+    assert.equal(parseBooked("abc"), 0);
+    assert.equal(parseBooked({}), 0);
   });
 
-  it("truncates decimals", () => {
-    assert.equal(parseBooked(5.9), 5);
-  });
-
-  it("clamps negatives to 0", () => {
-    assert.equal(parseBooked(-3), 0);
-  });
-
-  it("parses numeric strings", () => {
+  it("truncates floats and coerces numeric strings", () => {
+    assert.equal(parseBooked(3.9), 3);
     assert.equal(parseBooked("7"), 7);
+  });
+
+  it("clamps negative values to 0", () => {
+    assert.equal(parseBooked(-4), 0);
   });
 });
 
 describe("extractResults", () => {
-  it("returns results array from valid D1 response", () => {
-    const response = { success: true, result: [{ results: [{ a: 1 }] }] };
-    assert.deepEqual(extractResults(response), [{ a: 1 }]);
+  it("returns rows from a D1 response", () => {
+    const rows = [{ booked: 2 }];
+    assert.deepEqual(extractResults({ success: true, result: [{ results: rows }] }), rows);
   });
 
-  it("returns empty array for missing results", () => {
+  it("returns [] for malformed responses", () => {
     assert.deepEqual(extractResults({}), []);
     assert.deepEqual(extractResults(null), []);
     assert.deepEqual(extractResults("string"), []);
@@ -78,53 +52,19 @@ describe("extractResults", () => {
   });
 });
 
-describe("isSuccess", () => {
-  it("returns true for success", () => {
-    assert.equal(isSuccess({ success: true }), true);
-  });
-
-  it("returns false for failure or missing", () => {
-    assert.equal(isSuccess({ success: false }), false);
-    assert.equal(isSuccess({}), false);
-    assert.equal(isSuccess(null), false);
-  });
-});
-
-describe("getAvailableSeatsFromResult", () => {
+describe("remaining seat arithmetic", () => {
   it("returns MAX_SEATS when no bookings", () => {
-    assert.equal(
-      getAvailableSeatsFromResult({
-        success: true,
-        result: [{ results: [{ booked: 0 }] }],
-      }),
-      20,
-    );
+    const rows = extractResults({ success: true, result: [{ results: [{ booked: 0 }] }] });
+    assert.equal(MAX_SEATS - parseBooked((rows[0] as { booked?: unknown } | undefined)?.booked), 20);
   });
 
   it("returns remaining seats", () => {
-    assert.equal(
-      getAvailableSeatsFromResult({
-        success: true,
-        result: [{ results: [{ booked: 5 }] }],
-      }),
-      15,
-    );
+    const rows = extractResults({ success: true, result: [{ results: [{ booked: 5 }] }] });
+    assert.equal(MAX_SEATS - parseBooked((rows[0] as { booked?: unknown } | undefined)?.booked), 15);
   });
 
-  it("handles null booked", () => {
-    assert.equal(
-      getAvailableSeatsFromResult({
-        success: true,
-        result: [{ results: [{ booked: null }] }],
-      }),
-      20,
-    );
-  });
-
-  it("throws on failed query", () => {
-    assert.throws(
-      () => getAvailableSeatsFromResult({ success: false, result: [] }),
-      /D1 query failed/,
-    );
+  it("handles a null booked value", () => {
+    const rows = extractResults({ success: true, result: [{ results: [{ booked: null }] }] });
+    assert.equal(MAX_SEATS - parseBooked((rows[0] as { booked?: unknown } | undefined)?.booked), 20);
   });
 });

@@ -30,6 +30,19 @@ async function queryD1(sql: string, params: unknown[] = []) {
   return response.data;
 }
 
+/** Coerce a D1 COUNT(*) value to a non-negative integer. */
+export function parseBooked(raw: unknown): number {
+  if (raw === null || raw === undefined || Number.isNaN(Number(raw))) return 0;
+  return Math.max(0, Math.trunc(Number(raw)));
+}
+
+/** Pull the rows array out of a Cloudflare D1 query response. */
+export function extractResults(result: unknown): unknown[] {
+  if (!result || typeof result !== "object") return [];
+  const r = result as { result?: { results?: unknown[] }[] };
+  return r.result?.[0]?.results ?? [];
+}
+
 export async function getAvailableSeats(eventId: string): Promise<number> {
   const result = await queryD1(
     "SELECT COALESCE(COUNT(*), 0) as booked FROM event_attendees WHERE event_id = ?",
@@ -43,13 +56,10 @@ export async function getAvailableSeats(eventId: string): Promise<number> {
     throw new Error("D1 query failed");
   }
 
-  // COUNT(*) returns exactly one row (0 when the table is empty), but coerce
-  // defensively so `MAX_SEATS - booked` always operates on an integer.
-  const raw = result.result?.[0]?.results?.[0]?.booked;
-  const booked =
-    raw === null || raw === undefined || Number.isNaN(Number(raw))
-      ? 0
-      : Math.max(0, Math.trunc(Number(raw)));
+  // COUNT(*) returns exactly one row (0 when the table is empty); parseBooked
+  // coerces defensively so `MAX_SEATS - booked` always operates on an integer.
+  const rows = extractResults(result);
+  const booked = parseBooked((rows[0] as { booked?: unknown } | undefined)?.booked);
   return MAX_SEATS - booked;
 }
 
@@ -107,8 +117,8 @@ export async function getAttendeeByPaymentIntent(
     throw new Error("D1 query failed");
   }
 
-  const rows = result.result?.[0]?.results as unknown as Attendee[] | undefined;
-  return rows?.[0] ?? null;
+  const rows = extractResults(result) as Attendee[];
+  return rows[0] ?? null;
 }
 
 export { MAX_SEATS };
