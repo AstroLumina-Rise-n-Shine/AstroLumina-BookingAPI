@@ -23,6 +23,11 @@ RUN npm run build
 FROM node:24.22.1-alpine3.24 AS runner
 WORKDIR /app
 
+# Release identifier baked per image build so Sentry events carry the same
+# release the CI job uploaded source maps for.
+ARG SENTRY_RELEASE=""
+ENV SENTRY_RELEASE=${SENTRY_RELEASE}
+
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 -G nodejs
 

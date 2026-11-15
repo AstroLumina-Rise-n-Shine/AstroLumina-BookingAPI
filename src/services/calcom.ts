@@ -14,14 +14,14 @@ const CAL_EVENT_TYPES_VERSION = "2024-06-14";
 const CAL_SLOTS_VERSION = "2024-09-04";
 const CAL_BOOKINGS_VERSION = "2026-02-25";
 
-function unwrapData<T>(body: unknown): T | undefined {
+export function unwrapData<T>(body: unknown): T | undefined {
   if (body && typeof body === "object" && "data" in body) {
     return (body as { data: T }).data;
   }
   return undefined;
 }
 
-function normalizeSlotEntry(item: unknown): CalComSlot {
+export function normalizeSlotEntry(item: unknown): CalComSlot {
   if (item && typeof item === "object" && "start" in item) {
     const o = item as { start: string; end?: string };
     return { start: o.start, end: o.end ?? o.start };
@@ -30,7 +30,7 @@ function normalizeSlotEntry(item: unknown): CalComSlot {
   return { start: s, end: s };
 }
 
-function normalizeSlotsBody(body: unknown): Record<string, CalComSlot[]> {
+export function normalizeSlotsBody(body: unknown): Record<string, CalComSlot[]> {
   const map =
     unwrapData<Record<string, unknown>>(body) ??
     (body as Record<string, unknown>);
@@ -45,7 +45,7 @@ function normalizeSlotsBody(body: unknown): Record<string, CalComSlot[]> {
   return out;
 }
 
-function normalizeBookingV2(raw: unknown): CalComBooking {
+export function normalizeBookingV2(raw: unknown): CalComBooking {
   const b = raw as CalComBooking & { start?: string; end?: string };
   return {
     ...b,

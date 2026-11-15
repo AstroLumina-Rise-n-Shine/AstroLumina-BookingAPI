@@ -153,6 +153,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SENTRY_RELEASE=${{ needs.version.outputs.version }}
 
   sast-semgrep:
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
@@ -166,7 +168,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Semgrep scan (blocking)
-        # Docker image `semgrep/semgrep:1.182.0` instead of pip-installed
+        # Docker image `semgrep/semgrep:1.185.0` instead of pip-installed
         # Semgrep: on GitHub runners the pip `semgrep-core` binary
         # intermittently segfaults (exit code -11) — even pinned and with
         # `--jobs 1` — while the official container's bundled core-binary
@@ -180,7 +182,7 @@ jobs:
             -e SEMGREP_SEND_METRICS=off \
             -v "${{ github.workspace }}:/src" \
             -w /src \
-            semgrep/semgrep:1.182.0 \
+            semgrep/semgrep:1.185.0 \
             semgrep scan --config p/default --error --jobs 1 --sarif --output semgrep.sarif
 
       - name: Upload SARIF to code scanning
@@ -230,7 +232,7 @@ jobs:
       - name: Trivy repo scan — vuln, secrets, misconfig (blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
         with:
-          version: v0.76.1
+          version: v0.76.2
           scan-type: fs
           scan-ref: .
           scanners: vuln,secret,misconfig
@@ -276,7 +278,7 @@ jobs:
       - name: Trivy image scan (blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, SHA-pinned (supply-chain safety)
         with:
-          version: v0.76.1
+          version: v0.76.2
           scan-type: image
           image-ref: booking-api:security-scan
           scanners: vuln,misconfig,secret
@@ -655,6 +657,51 @@ jobs:
                 --body "Automated staging promotion of ${{ env.SVC_NAME }} to ${{ env.NEW_TAG }} (idle color ${{ env.IDLE_COLOR }}, live flipped). Merge to deploy to staging."
             fi
           fi
+
+  sentry-release:
+    # Creates a Sentry release, injects and uploads source maps.
+    # Runs only when code changes are merged to main (new version tag created).
+    needs: [version, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.version.outputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project (produces source maps in dist/)
+        run: npm run build
+
+      - name: Create Sentry release and upload source maps
+        # Pinned to a full commit SHA (supply-chain safety); semgrep blocks
+        # mutable action tags. `inject` writes Debug IDs into the build output
+        # and `sourcemaps` uploads the matching maps in the same step, so the
+        # release, the files and the maps always agree.
+        uses: getsentry/action-release@e3542deb6dd46200cca4bd79d4096d4bdb92e1b7
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_ORG_TOKEN }}
+          SENTRY_ORG: astrolumina
+          SENTRY_PROJECT: astrolumina-booking-api
+        with:
+          version: ${{ needs.version.outputs.version }}
+          projects: astrolumina-booking-api
+          environment: production
+          inject: true
+          sourcemaps: ./dist
+          finalize: true
+          disable_telemetry: true
 
   promote-compose:
     # Reads the live color from the app router in routes.yml (parsed as

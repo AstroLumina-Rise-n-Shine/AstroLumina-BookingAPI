@@ -10,19 +10,21 @@ if (env.BOOKING_API_SENTRY_DSN) {
   Sentry.init({
     dsn: env.BOOKING_API_SENTRY_DSN,
     environment: env.NODE_ENV,
+    release: env.SENTRY_RELEASE || undefined,
 
     sampleRate: 1.0,
     includeLocalVariables: true,
     maxBreadcrumbs: 100,
 
     tracesSampler: (samplingContext) => {
+      // Sample 100% of booking endpoints
+      if (samplingContext?.transactionContext?.name?.includes("/api/")) {
+        return 1.0;
+      }
       if (samplingContext?.transactionContext?.name?.includes("/health")) {
         return 0.01;
       }
-      if (samplingContext?.transactionContext?.name?.includes("/api/")) {
-        return isProduction ? 0.2 : 1.0;
-      }
-      return isProduction ? 0.1 : 1.0;
+      return isProduction ? 0.2 : 1.0;
     },
 
     tracePropagationTargets: [
