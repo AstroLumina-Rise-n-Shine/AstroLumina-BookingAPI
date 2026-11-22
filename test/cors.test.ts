@@ -23,7 +23,7 @@ describe("defaultOrigins", () => {
 
   it("covers the lab IPs for every service DC port", () => {
     for (const port of [ASTROLOGY_DC_PORT, BOOKING_DC_PORT, PAYMENT_DC_PORT]) {
-      for (const ip of ["192.168.122.10", "192.168.122.11", "192.168.122.12"]) {
+      for (const ip of ["192.168.200.210", "192.168.200.211", "192.168.200.212", "192.168.100.210", "192.168.100.211", "192.168.100.212"]) {
         assert.ok(defaultOrigins.includes(`http://${ip}:${port}`));
         assert.ok(defaultOrigins.includes(`https://${ip}:${port}`));
       }
